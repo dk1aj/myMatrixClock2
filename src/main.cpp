@@ -18,7 +18,7 @@ const uint8_t kIndexedLayerOptions = (SM_INDEXED_OPTIONS_NONE);
 SMARTMATRIX_ALLOCATE_BUFFERS(matrix, kMatrixWidth, kMatrixHeight, kRefreshDepth, kDmaBufferRows, kPanelType, kMatrixOptions);
 SMARTMATRIX_ALLOCATE_INDEXED_LAYER(indexedLayer, kMatrixWidth, kMatrixHeight, COLOR_DEPTH, kIndexedLayerOptions);
 
-const int nightBrightness = 1;
+const int nightBrightness = 0;
 const int dayBrightness = 10;
 const int ledPin = 13;
 
@@ -113,7 +113,18 @@ uint8_t lastSundayOfMonth(int year, int month)
  */
 void my_DaylightSavingTime(void)
 {
-    int year = tmYearToCalendar(tm.Year);
+    /*
+     * Time library:
+     * Wday = 1 -> Sunday
+     * Wday = 2 -> Monday
+     * ...
+     * Wday = 7 -> Saturday
+     *
+     * RTC runs in CET / winter time.
+     * DST rule for Central Europe:
+     * - Starts: last Sunday in March at 02:00 CET
+     * - Ends:   last Sunday in October at 03:00 CEST
+     */
 
     if (tm.Month < 3 || tm.Month > 10)
     {
@@ -127,10 +138,16 @@ void my_DaylightSavingTime(void)
         return;
     }
 
+    /*
+     * Calculate date of the last Sunday in current month.
+     * Since Sunday = 1, the number of days back from the 31st/30th/etc.
+     * is (tm.Wday - 1).
+     */
+    int year = tmYearToCalendar(tm.Year);
+    uint8_t changeDay = lastSundayOfMonth(year, tm.Month);
+
     if (tm.Month == 3)
     {
-        uint8_t changeDay = lastSundayOfMonth(year, 3);
-
         if (tm.Day < changeDay)
         {
             dst = 0;
@@ -141,6 +158,7 @@ void my_DaylightSavingTime(void)
         }
         else
         {
+            /* Changeover day in March: switch at 02:00 CET */
             dst = (tm.Hour >= 2) ? 1 : 0;
         }
 
@@ -149,8 +167,6 @@ void my_DaylightSavingTime(void)
 
     if (tm.Month == 10)
     {
-        uint8_t changeDay = lastSundayOfMonth(year, 10);
-
         if (tm.Day < changeDay)
         {
             dst = 1;
@@ -161,13 +177,14 @@ void my_DaylightSavingTime(void)
         }
         else
         {
+            /* Changeover day in October: switch back at 03:00 CEST */
             dst = (tm.Hour >= 3) ? 0 : 1;
         }
 
         return;
     }
 }
-/*
+ /*
  * Print clock-style minutes or seconds to the serial interface.
  *
  * This function always prints a colon first and then the value,
