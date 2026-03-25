@@ -268,7 +268,26 @@ bool setRTCFromSerial(void)
                  * tmElements_t so that the weekday field is filled correctly.
                  */
                 time_t t = makeTime(tmSet);
-                breakTime(t, tmSet);
+                tmElements_t normalized;
+                breakTime(t, normalized);
+
+                /*
+                * Reject impossible calendar dates such as 2026-02-31.
+                * makeTime() normalizes out-of-range dates to the next month,
+                * therefore we compare the normalized value with user input.
+                */
+                if (tmYearToCalendar(normalized.Year) != year ||
+                    normalized.Month != month ||
+                    normalized.Day != day ||
+                    normalized.Hour != hour ||
+                    normalized.Minute != minute ||
+                    normalized.Second != second)
+                {
+                    Serial.println("Invalid calendar date");
+                    return false;
+                }
+
+                tmSet = normalized;
 
                 if (RTC.write(tmSet))
                 {
@@ -469,6 +488,9 @@ void loop()
     }
 
     unsigned long currentMillis = millis();
+    char timeBuffer[16];
+    char txtBuffer[16];
+    char dateBuffer[16];
 
     /*
      * Update the display once every 1000 milliseconds.
@@ -477,9 +499,7 @@ void loop()
     {
         lastDisplayUpdate = currentMillis;
 
-        char timeBuffer[16];
-        char txtBuffer[16];
-        char dateBuffer[16];
+
 
         /*
          * Clear the indexed layer before drawing the new frame.
@@ -502,17 +522,17 @@ void loop()
              * Apply the daylight saving offset for display purposes only.
              * The RTC itself remains in base time.
              */
-            uint8_t hour = tm.Hour + dst;
-            if (hour > 23)
+            uint8_t displayHour  = tm.Hour + dst;
+            if (displayHour  > 23)
             {
-                hour = 0;
+                displayHour  = 0;
             }
 
             /*
              * Use low brightness from 20:00 to 07:59,
              * otherwise use normal daytime brightness.
              */
-            if (hour >= 20 || hour < 8)
+            if (displayHour  >= 20 || displayHour  < 8)
             {
                 matrix.setBrightness(nightBrightness);
             }
@@ -527,11 +547,9 @@ void loop()
              * dateBuffer shows day and month.
              * txtBuffer shows the DST state.
              */
-			// sprintf(timeBuffer, "%d:%02d:%02d", hour, tm.Minute,tm.Second);
-            sprintf(timeBuffer, "%d:%02d", hour, tm.Minute);
-            sprintf(dateBuffer, "%d.%02d", tm.Day, tm.Month);
-            // sprintf(txtBuffer, dst ? "DST 1" : "DST 0");
-			sprintf(txtBuffer, "DST %d W%u", dst, tm.Wday);
+            snprintf(timeBuffer, sizeof(timeBuffer), "%d:%02d", displayHour , tm.Minute);
+            snprintf(dateBuffer, sizeof(dateBuffer), "%d.%02d", tm.Day, tm.Month);
+            snprintf(txtBuffer, sizeof(txtBuffer), "DST %d W%u", dst, tm.Wday);
 
             /*
              * Draw the time using the larger font.
@@ -541,7 +559,7 @@ void loop()
             // indexedLayer.setFont(font6x10);
 			
 			
-            if (hour < 10)
+            if (displayHour  < 10)
             {
                 indexedLayer.setFont(gohufont11);
 				indexedLayer.drawString(3, 0, 1, timeBuffer);
