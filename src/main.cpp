@@ -4,600 +4,484 @@
 #include <DS1307RTC.h>
 #include <SmartMatrix3.h>
 
-#define DEBUG_LDR 1
+
 #define COLOR_DEPTH 24
 
-const uint8_t kMatrixWidth = 32;
-const uint8_t kMatrixHeight = 32;
-const uint8_t kRefreshDepth = 48;
-const uint8_t kDmaBufferRows = 4;
-const uint8_t kPanelType = SMARTMATRIX_HUB75_32ROW_MOD16SCAN;
-const uint8_t kMatrixOptions = (SMARTMATRIX_OPTIONS_NONE);
-const uint8_t kIndexedLayerOptions = (SM_INDEXED_OPTIONS_NONE);
+namespace
+{
+constexpr uint8_t kMatrixWidth = 32;
+constexpr uint8_t kMatrixHeight = 32;
+constexpr uint8_t kRefreshDepth = 48;
+constexpr uint8_t kDmaBufferRows = 4;
+constexpr uint8_t kPanelType = SMARTMATRIX_HUB75_32ROW_MOD16SCAN;
+constexpr uint8_t kMatrixOptions = SMARTMATRIX_OPTIONS_NONE;
+constexpr uint8_t kIndexedLayerOptions = SM_INDEXED_OPTIONS_NONE;
+
+constexpr int kNightBrightness = 0;
+constexpr int kDayBrightness = 10;
+constexpr int kLedPin = 13;
+
+constexpr unsigned long kDisplayUpdateIntervalMs = 1000;
+constexpr unsigned long kStartupPromptDelayMs = 2000;
+constexpr unsigned long kStartupSplashDurationMs = 5000;
+constexpr uint32_t kSerialBaud = 9600;
+
+constexpr uint8_t kDstStartMonth = 3;
+constexpr uint8_t kDstEndMonth = 10;
+constexpr uint8_t kDstStartHour = 2;
+constexpr uint8_t kDstEndHour = 3;
+constexpr uint8_t kNightModeStartHour = 20;
+constexpr uint8_t kNightModeEndHour = 8;
+constexpr int kStandardUtcOffsetHours = 1;
+
+constexpr char kStartupLabel[] = "DK1AJ";
+constexpr char kTimeInputFormat[] = "YYYY-MM-DD HH:MM:SS + CR/LF";
+}
 
 SMARTMATRIX_ALLOCATE_BUFFERS(matrix, kMatrixWidth, kMatrixHeight, kRefreshDepth, kDmaBufferRows, kPanelType, kMatrixOptions);
 SMARTMATRIX_ALLOCATE_INDEXED_LAYER(indexedLayer, kMatrixWidth, kMatrixHeight, COLOR_DEPTH, kIndexedLayerOptions);
 
-const int nightBrightness = 0;
-const int dayBrightness = 10;
-const int ledPin = 13;
-
-boolean dst = 1;
-
+bool dst = true;
 unsigned long lastDisplayUpdate = 0;
 unsigned long setupStartMillis = 0;
 bool startupMessageShown = false;
-
 tmElements_t tm;
+tmElements_t utcTime;
 
-/*
- * Calculate whether daylight saving time is currently active.
- *
- * This logic follows the common Central European DST rule:
- * - DST is inactive from January through February and from November through December.
- * - DST is active from April through September.
- * - In March, DST starts on the last Sunday at 02:00.
- * - In October, DST ends on the last Sunday at 03:00.
- *
- * The code uses tm.Day and tm.Wday from the RTC time structure.
- * In the Time library, Wday is 1 for Sunday.
- */
-/*
- * Return the calendar day number of the last Sunday in a given month.
- *
- * Parameters:
- * - year: full calendar year, for example 2026
- * - month: 1..12
- *
- * The function checks the last seven days of the month and returns
- * the day number that falls on Sunday.
- */
-uint8_t lastSundayOfMonth(int year, int month)
+bool isLeapYear(int year)
 {
-    static const uint8_t daysInMonth[] =
+    return ((year % 4 == 0) && (year % 100 != 0)) || (year % 400 == 0);
+}
+
+uint8_t lastDayOfMonth(int year, int month)
+{
+    static const uint8_t kDaysInMonth[] =
     {
         31, 28, 31, 30, 31, 30,
         31, 31, 30, 31, 30, 31
     };
 
-    uint8_t lastDay = daysInMonth[month - 1];
-
-    /*
-     * Leap year correction for February.
-     */
-    if (month == 2)
+    if (month == 2 && isLeapYear(year))
     {
-        bool leapYear = ((year % 4 == 0) && (year % 100 != 0)) || (year % 400 == 0);
-        if (leapYear)
-        {
-            lastDay = 29;
-        }
+        return 29;
     }
 
-    /*
-     * Start from the last day of the month and walk backwards
-     * until a Sunday is found.
-     */
-    for (int day = lastDay; day >= lastDay - 6; day--)
+    return kDaysInMonth[month - 1];
+}
+
+uint8_t lastSundayOfMonth(int year, int month)
+{
+    const uint8_t lastDay = lastDayOfMonth(year, month);
+
+    for (int day = lastDay; day >= lastDay - 6; --day)
     {
-        tmElements_t temp;
-        temp.Year   = CalendarYrToTm(year);
-        temp.Month  = month;
-        temp.Day    = day;
-        temp.Hour   = 12;
-        temp.Minute = 0;
-        temp.Second = 0;
+        tmElements_t date = {};
+        date.Year = CalendarYrToTm(year);
+        date.Month = month;
+        date.Day = day;
+        date.Hour = 12;
 
-        time_t t = makeTime(temp);
-        breakTime(t, temp);
+        time_t t = makeTime(date);
+        breakTime(t, date);
 
-        if (temp.Wday == 1)
+        if (date.Wday == 1)
         {
             return day;
         }
     }
 
-    return 31;
+    return lastDay;
 }
 
-/*
- * Calculate whether daylight saving time is active.
- *
- * Base time in the RTC is always standard time (CET / winter time).
- *
- * DST rules used here:
- * - January, February, November, December: DST off
- * - April to September: DST on
- * - March: DST starts on the last Sunday at 02:00 CET
- * - October: DST ends on the last Sunday at 03:00 CET
- */
-void my_DaylightSavingTime(void)
+bool isDstActive(const tmElements_t& rtcTime)
 {
-    /*
-     * Time library:
-     * Wday = 1 -> Sunday
-     * Wday = 2 -> Monday
-     * ...
-     * Wday = 7 -> Saturday
-     *
-     * RTC runs in CET / winter time.
-     * DST rule for Central Europe:
-     * - Starts: last Sunday in March at 02:00 CET
-     * - Ends:   last Sunday in October at 03:00 CEST
-     */
-
-    if (tm.Month < 3 || tm.Month > 10)
+    if (rtcTime.Month < kDstStartMonth || rtcTime.Month > kDstEndMonth)
     {
-        dst = 0;
-        return;
+        return false;
     }
 
-    if (tm.Month > 3 && tm.Month < 10)
+    if (rtcTime.Month > kDstStartMonth && rtcTime.Month < kDstEndMonth)
     {
-        dst = 1;
-        return;
+        return true;
     }
 
-    /*
-     * Calculate date of the last Sunday in current month.
-     * Since Sunday = 1, the number of days back from the 31st/30th/etc.
-     * is (tm.Wday - 1).
-     */
-    int year = tmYearToCalendar(tm.Year);
-    uint8_t changeDay = lastSundayOfMonth(year, tm.Month);
+    const uint8_t changeDay = lastSundayOfMonth(tmYearToCalendar(rtcTime.Year), rtcTime.Month);
 
-    if (tm.Month == 3)
+    if (rtcTime.Month == kDstStartMonth)
     {
-        if (tm.Day < changeDay)
+        if (rtcTime.Day < changeDay)
         {
-            dst = 0;
-        }
-        else if (tm.Day > changeDay)
-        {
-            dst = 1;
-        }
-        else
-        {
-            /* Changeover day in March: switch at 02:00 CET */
-            dst = (tm.Hour >= 2) ? 1 : 0;
+            return false;
         }
 
-        return;
+        if (rtcTime.Day > changeDay)
+        {
+            return true;
+        }
+
+        return rtcTime.Hour >= kDstStartHour;
     }
 
-    if (tm.Month == 10)
+    if (rtcTime.Day < changeDay)
     {
-        if (tm.Day < changeDay)
-        {
-            dst = 1;
-        }
-        else if (tm.Day > changeDay)
-        {
-            dst = 0;
-        }
-        else
-        {
-            /* Changeover day in October: switch back at 03:00 CEST */
-            dst = (tm.Hour >= 3) ? 0 : 1;
-        }
-
-        return;
+        return true;
     }
+
+    if (rtcTime.Day > changeDay)
+    {
+        return false;
+    }
+
+    return rtcTime.Hour < kDstEndHour;
 }
- /*
- * Print clock-style minutes or seconds to the serial interface.
- *
- * This function always prints a colon first and then the value,
- * adding a leading zero for single-digit numbers.
- *
- * Example:
- * input 7  -> ":07"
- * input 42 -> ":42"
- */
-void printDigits(int16_t digits)
-{
-    Serial.print(":");
 
-    if (digits < 10)
+void updateUtcTime(const tmElements_t& rtcTime)
+{
+    // The RTC is handled as local standard time (CET), so UTC is one hour behind.
+    const time_t utcTimestamp = makeTime(rtcTime) - (kStandardUtcOffsetHours * SECS_PER_HOUR);
+    breakTime(utcTimestamp, utcTime);
+}
+
+void printTwoDigits(int value)
+{
+    if (value < 10)
     {
         Serial.print('0');
     }
 
-    Serial.print(digits);
+    Serial.print(value);
 }
 
-/*
- * Read one full line from the serial monitor and try to set the RTC.
- *
- * Expected input format:
- * YYYY-MM-DD HH:MM:SS
- *
- * Example:
- * 2026-03-25 14:30:00
- *
- * Behavior:
- * - Ignores carriage return characters.
- * - Waits for a newline to treat the line as complete.
- * - Accepts only printable characters into the buffer.
- * - Rejects overlong input safely.
- * - Validates numeric ranges before writing to the RTC.
- * - Calculates the weekday automatically from the entered date.
- * - Updates both the RTC and the system time if successful.
- */
+void printClockDisplay(const tmElements_t& rtcTime, bool dstActive)
+{
+    Serial.print(rtcTime.Hour);
+    Serial.print(':');
+    printTwoDigits(rtcTime.Minute);
+    Serial.print(':');
+    printTwoDigits(rtcTime.Second);
+    Serial.print(' ');
+    Serial.print(rtcTime.Day);
+    Serial.print('.');
+    Serial.print(rtcTime.Month);
+    Serial.print('.');
+    Serial.print(tmYearToCalendar(rtcTime.Year));
+    Serial.print(" DST=");
+    Serial.print(dstActive);
+    Serial.print(" wday=");
+    Serial.println(rtcTime.Wday);
+}
+
+void printUtcClockDisplay(const tmElements_t& timeUtc)
+{
+    Serial.print("UTC ");
+    Serial.print(timeUtc.Hour);
+    Serial.print(':');
+    printTwoDigits(timeUtc.Minute);
+    Serial.print(':');
+    printTwoDigits(timeUtc.Second);
+    Serial.print(' ');
+    Serial.print(timeUtc.Day);
+    Serial.print('.');
+    Serial.print(timeUtc.Month);
+    Serial.print('.');
+    Serial.println(tmYearToCalendar(timeUtc.Year));
+}
+
+void printNormalizedTimestamp(int year, int month, int day, int hour, int minute, int second)
+{
+    Serial.print("RTC set to: ");
+    Serial.print(year);
+    Serial.print('-');
+    printTwoDigits(month);
+    Serial.print('-');
+    printTwoDigits(day);
+    Serial.print(' ');
+    printTwoDigits(hour);
+    Serial.print(':');
+    printTwoDigits(minute);
+    Serial.print(':');
+    printTwoDigits(second);
+    Serial.println();
+}
+
+bool hasBasicDateTimeRange(int year, int month, int day, int hour, int minute, int second)
+{
+    return year >= 2000 && year <= 2099 &&
+           month >= 1 && month <= 12 &&
+           day >= 1 && day <= 31 &&
+           hour >= 0 && hour <= 23 &&
+           minute >= 0 && minute <= 59 &&
+           second >= 0 && second <= 59;
+}
+
+bool parseRtcInput(const char* input, tmElements_t& normalized, time_t& parsedTime)
+{
+    int year = 0;
+    int month = 0;
+    int day = 0;
+    int hour = 0;
+    int minute = 0;
+    int second = 0;
+
+    if (sscanf(input, "%d-%d-%d %d:%d:%d", &year, &month, &day, &hour, &minute, &second) != 6)
+    {
+        Serial.print("Received: [");
+        Serial.print(input);
+        Serial.println(']');
+        Serial.print("Invalid format. Please enter: ");
+        Serial.println(kTimeInputFormat);
+        return false;
+    }
+
+    if (!hasBasicDateTimeRange(year, month, day, hour, minute, second))
+    {
+        Serial.println("Invalid date/time values");
+        return false;
+    }
+
+    tmElements_t candidate = {};
+    candidate.Year = CalendarYrToTm(year);
+    candidate.Month = month;
+    candidate.Day = day;
+    candidate.Hour = hour;
+    candidate.Minute = minute;
+    candidate.Second = second;
+
+    parsedTime = makeTime(candidate);
+    breakTime(parsedTime, normalized);
+
+    if (tmYearToCalendar(normalized.Year) != year ||
+        normalized.Month != month ||
+        normalized.Day != day ||
+        normalized.Hour != hour ||
+        normalized.Minute != minute ||
+        normalized.Second != second)
+    {
+        Serial.println("Invalid calendar date");
+        return false;
+    }
+
+    return true;
+}
+
+void discardSerialLine(void)
+{
+    while (Serial.available() > 0)
+    {
+        if (Serial.read() == '\n')
+        {
+            break;
+        }
+    }
+}
+
 bool setRTCFromSerial(void)
 {
     static char input[32];
     static uint8_t idx = 0;
+    static bool ignoreNextLineFeed = false;
 
     while (Serial.available() > 0)
     {
-        char c = Serial.read();
+        const char c = Serial.read();
 
-        if (c == '\r')
+        if (ignoreNextLineFeed && c == '\n')
+        {
+            ignoreNextLineFeed = false;
+            continue;
+        }
+
+        if (c == '\r' || c == '\n')
+        {
+            ignoreNextLineFeed = (c == '\r');
+
+            input[idx] = '\0';
+            idx = 0;
+
+            if (input[0] == '\0')
+            {
+                return false;
+            }
+
+            tmElements_t normalized = {};
+            time_t parsedTime = 0;
+
+            if (!parseRtcInput(input, normalized, parsedTime))
+            {
+                return false;
+            }
+
+            if (!RTC.write(normalized))
+            {
+                Serial.println("Error: RTC write failed");
+                return false;
+            }
+
+            setTime(parsedTime);
+            printNormalizedTimestamp(
+                tmYearToCalendar(normalized.Year),
+                normalized.Month,
+                normalized.Day,
+                normalized.Hour,
+                normalized.Minute,
+                normalized.Second);
+            return true;
+        }
+
+        if (c < 32 || c > 126)
         {
             continue;
         }
 
-        if (c == '\n')
+        if (idx < sizeof(input) - 1)
         {
-            input[idx] = '\0';
-
-            if (idx == 0)
-            {
-                return false;
-            }
-
-            idx = 0;
-
-            int year, month, day, hour, minute, second;
-
-            if (sscanf(input, "%d-%d-%d %d:%d:%d",
-                       &year, &month, &day,
-                       &hour, &minute, &second) == 6)
-            {
-                if (year < 2000 || year > 2099 ||
-                    month < 1 || month > 12 ||
-                    day < 1 || day > 31 ||
-                    hour < 0 || hour > 23 ||
-                    minute < 0 || minute > 59 ||
-                    second < 0 || second > 59)
-                {
-                    Serial.println("Invalid date/time values");
-                    return false;
-                }
-
-                tmElements_t tmSet;
-
-                /*
-                 * The Time library stores the year as an internal offset.
-                 * CalendarYrToTm converts a normal calendar year such as 2026
-                 * into the format expected by tmElements_t.
-                 */
-                tmSet.Year   = CalendarYrToTm(year);
-                tmSet.Month  = month;
-                tmSet.Day    = day;
-                tmSet.Hour   = hour;
-                tmSet.Minute = minute;
-                tmSet.Second = second;
-
-                /*
-                 * Convert the entered time to time_t and then back to
-                 * tmElements_t so that the weekday field is filled correctly.
-                 */
-                time_t t = makeTime(tmSet);
-                tmElements_t normalized;
-                breakTime(t, normalized);
-
-                /*
-                * Reject impossible calendar dates such as 2026-02-31.
-                * makeTime() normalizes out-of-range dates to the next month,
-                * therefore we compare the normalized value with user input.
-                */
-                if (tmYearToCalendar(normalized.Year) != year ||
-                    normalized.Month != month ||
-                    normalized.Day != day ||
-                    normalized.Hour != hour ||
-                    normalized.Minute != minute ||
-                    normalized.Second != second)
-                {
-                    Serial.println("Invalid calendar date");
-                    return false;
-                }
-
-                tmSet = normalized;
-
-                if (RTC.write(tmSet))
-                {
-                    /*
-                     * Keep the software clock synchronized with the RTC value
-                     * that has just been written.
-                     */
-                    setTime(t);
-
-                    Serial.print("RTC set to: ");
-                    Serial.print(year);
-                    Serial.print("-");
-                    if (month < 10) Serial.print("0");
-                    Serial.print(month);
-                    Serial.print("-");
-                    if (day < 10) Serial.print("0");
-                    Serial.print(day);
-                    Serial.print(" ");
-                    if (hour < 10) Serial.print("0");
-                    Serial.print(hour);
-                    Serial.print(":");
-                    if (minute < 10) Serial.print("0");
-                    Serial.print(minute);
-                    Serial.print(":");
-                    if (second < 10) Serial.print("0");
-                    Serial.println(second);
-
-                    return true;
-                }
-                else
-                {
-                    Serial.println("Error: RTC write failed");
-                    return false;
-                }
-            }
-            else
-            {
-                /*
-                 * Echo the received line for diagnostics.
-                 * This helps identify malformed or unexpected input.
-                 */
-                Serial.print("Received: [");
-                Serial.print(input);
-                Serial.println("]");
-                Serial.println("Invalid format. Please enter: YYYY-MM-DD HH:MM:SS");
-                return false;
-            }
+            input[idx++] = c;
+            continue;
         }
 
-        /*
-         * Accept only printable ASCII characters.
-         * This prevents stray control characters from corrupting the buffer.
-         */
-        if (c >= 32 && c <= 126)
-        {
-            if (idx < sizeof(input) - 1)
-            {
-                input[idx++] = c;
-            }
-            else
-            {
-                /*
-                 * If the input is too long, discard the rest of the line
-                 * so the parser starts cleanly on the next attempt.
-                 */
-                idx = 0;
-
-                while (Serial.available() > 0)
-                {
-                    char dump = Serial.read();
-                    if (dump == '\n')
-                    {
-                        break;
-                    }
-                }
-
-                Serial.println("Input too long");
-                return false;
-            }
-        }
+        idx = 0;
+        discardSerialLine();
+        Serial.println("Input too long");
+        return false;
     }
 
     return false;
 }
 
-/*
- * Print the currently read RTC time to the serial port.
- *
- * The year is converted back to a normal calendar year because
- * tm.Year is stored internally as an offset.
- */
-static void Serial_Print_Clock_Display(void)
+void configureRtcPins(void)
 {
-    Serial.print(tm.Hour);
-    printDigits(tm.Minute);
-    printDigits(tm.Second);
-    Serial.print(" ");
-    Serial.print(tm.Day);
-    Serial.print(".");
-    Serial.print(tm.Month);
-    Serial.print(".");
-    Serial.print(tmYearToCalendar(tm.Year));
-    Serial.print(" DST=");
-    Serial.print(dst);
-    Serial.print(" wday=");
-    Serial.println(tm.Wday);
+    pinMode(18, INPUT);
+    pinMode(19, INPUT);
+    CORE_PIN16_CONFIG = PORT_PCR_MUX(2) | PORT_PCR_PE | PORT_PCR_PS;
+    CORE_PIN17_CONFIG = PORT_PCR_MUX(2) | PORT_PCR_PE | PORT_PCR_PS;
 }
 
-/*
- * Initialize serial communication, SmartMatrix, alternate I2C routing,
- * and synchronize the software clock with the RTC.
- */
+void showStartupSplash(void)
+{
+    matrix.setBrightness(kDayBrightness);
+    indexedLayer.fillScreen(0);
+    indexedLayer.setFont(gohufont11b);
+    indexedLayer.drawString(0, kMatrixHeight / 2 - 6, 1, kStartupLabel);
+    indexedLayer.swapBuffers(false);
+
+    const unsigned long splashStart = millis();
+    while (millis() - splashStart < kStartupSplashDurationMs)
+    {
+    }
+}
+
+void syncTimeFromRtc(void)
+{
+    setSyncProvider(RTC.get);
+
+    if (timeStatus() == timeSet)
+    {
+        Serial.println("RTC has set the system time");
+    }
+    else
+    {
+        Serial.println("Unable to sync with the RTC");
+    }
+}
+
+void maybeShowStartupPrompt(unsigned long now)
+{
+    if (startupMessageShown || (now - setupStartMillis < kStartupPromptDelayMs))
+    {
+        return;
+    }
+
+    Serial.print("Set time with: ");
+    Serial.println(kTimeInputFormat);
+    Serial.println("Example: 2026-03-25 14:30:00");
+    startupMessageShown = true;
+}
+
+uint8_t displayHourFrom(const tmElements_t& rtcTime, bool dstActive)
+{
+    return (rtcTime.Hour + (dstActive ? 1 : 0)) % 24;
+}
+
+void applyBrightness(uint8_t displayHour)
+{
+    const bool nightMode = displayHour >= kNightModeStartHour || displayHour < kNightModeEndHour;
+    matrix.setBrightness(nightMode ? kNightBrightness : kDayBrightness);
+}
+
+void drawClockScreen(const tmElements_t& rtcTime, bool dstActive)
+{
+    const uint8_t displayHour = displayHourFrom(rtcTime, dstActive);
+    char timeBuffer[16];
+    char dateBuffer[16];
+    char statusBuffer[16];
+
+    applyBrightness(displayHour);
+
+    snprintf(timeBuffer, sizeof(timeBuffer), "%d:%02d", displayHour, rtcTime.Minute);
+    snprintf(dateBuffer, sizeof(dateBuffer), "%d.%02d", rtcTime.Day, rtcTime.Month);
+    snprintf(statusBuffer, sizeof(statusBuffer), "DST %d W%u", dstActive, rtcTime.Wday);
+
+    if (displayHour < 10)
+    {
+        indexedLayer.setFont(gohufont11b);
+        indexedLayer.drawString(3, 0, 1, timeBuffer);
+    }
+    else
+    {
+        indexedLayer.setFont(gohufont11b);
+        indexedLayer.drawString(1, 0, 1, timeBuffer);
+    }
+
+    indexedLayer.setFont(font3x5);
+    indexedLayer.drawString(6, 20, 1, dateBuffer);
+    indexedLayer.drawString(0, 26, 1, statusBuffer);
+    indexedLayer.swapBuffers();
+}
+
 void setup()
 {
-    pinMode(ledPin, OUTPUT);
-    Serial.begin(9600);
+    pinMode(kLedPin, OUTPUT);
+    Serial.begin(kSerialBaud);
 
     matrix.addLayer(&indexedLayer);
     matrix.begin();
 
-    /*
-     * Draw a startup message so something is visible immediately,
-     * even if the RTC later fails to respond.
-     */
-    
-	matrix.setBrightness(dayBrightness);
-	indexedLayer.fillScreen(0);
-    indexedLayer.setFont(gohufont11b);
-    indexedLayer.drawString(0, kMatrixHeight / 2 - 6, 1, "DK1AJ");
-    indexedLayer.swapBuffers(false);
-
-    matrix.setBrightness(dayBrightness);
-
-	 /*
-     * Wait 5 seconds without using delay().
-     */
-    unsigned long brightnessWaitStart = millis();
-    while (millis() - brightnessWaitStart < 5000)
-    {
-        /*
-         * Keep the loop empty on purpose.
-         */
-    }
-	/*
-     * Reconfigure the pins so the RTC can use the alternate I2C pins
-     * required by this hardware arrangement.
-     */
-    pinMode(18, INPUT);
-    pinMode(19, INPUT);
-    CORE_PIN16_CONFIG = (PORT_PCR_MUX(2) | PORT_PCR_PE | PORT_PCR_PS);
-    CORE_PIN17_CONFIG = (PORT_PCR_MUX(2) | PORT_PCR_PE | PORT_PCR_PS);
-
-    /*
-     * Tell the Time library to use the RTC as its synchronization source.
-     */
-    setSyncProvider(RTC.get);
-
-    if (timeStatus() != timeSet)
-    {
-        Serial.println("Unable to sync with the RTC");
-    }
-    else
-    {
-        Serial.println("RTC has set the system time");
-    }
+    showStartupSplash();
+    configureRtcPins();
+    syncTimeFromRtc();
 
     setupStartMillis = millis();
 }
 
-/*
- * Main loop.
- *
- * Design:
- * - Serial input is handled without blocking delays.
- * - The display is updated once per second using millis().
- * - This keeps the serial interface responsive while maintaining
- *   a steady display refresh rate.
- */
 void loop()
 {
-    /*
-     * Show the input format message once, two seconds after startup.
-     * This replaces the old blocking delay-based startup behavior.
-     */
-    if (!startupMessageShown && (millis() - setupStartMillis >= 2000))
-    {
-        Serial.println("Set time with: YYYY-MM-DD HH:MM:SS");
-        Serial.println("Example: 2026-03-25 14:30:00");
-        startupMessageShown = true;
-    }
+    const unsigned long now = millis();
 
-    /*
-     * Process incoming serial data as soon as it arrives.
-     */
-    if (Serial.available())
+    maybeShowStartupPrompt(now);
+
+    if (Serial.available() > 0)
     {
         setRTCFromSerial();
     }
 
-    unsigned long currentMillis = millis();
-    char timeBuffer[16];
-    char txtBuffer[16];
-    char dateBuffer[16];
-
-    /*
-     * Update the display once every 1000 milliseconds.
-     */
-    if (currentMillis - lastDisplayUpdate >= 1000)
+    if (now - lastDisplayUpdate < kDisplayUpdateIntervalMs)
     {
-        lastDisplayUpdate = currentMillis;
-
-
-
-        /*
-         * Clear the indexed layer before drawing the new frame.
-         */
-        indexedLayer.fillScreen(0);
-
-        /*
-         * Read the current time from the RTC.
-         * Update the display only if the read succeeds.
-         */
-        if (RTC.read(tm))
-        {
-            my_DaylightSavingTime();
-
-#ifdef DEBUG_LDR
-            Serial_Print_Clock_Display();
-#endif
-
-            /*
-             * Apply the daylight saving offset for display purposes only.
-             * The RTC itself remains in base time.
-             */
-            uint8_t displayHour  = tm.Hour + dst;
-            if (displayHour  > 23)
-            {
-                displayHour  = 0;
-            }
-
-            /*
-             * Use low brightness from 20:00 to 07:59,
-             * otherwise use normal daytime brightness.
-             */
-            if (displayHour  >= 20 || displayHour  < 8)
-            {
-                matrix.setBrightness(nightBrightness);
-            }
-            else
-            {
-                matrix.setBrightness(dayBrightness);
-            }
-
-            /*
-             * Format the display strings.
-             * timeBuffer shows hour and minute.
-             * dateBuffer shows day and month.
-             * txtBuffer shows the DST state.
-             */
-            snprintf(timeBuffer, sizeof(timeBuffer), "%d:%02d", displayHour , tm.Minute);
-            snprintf(dateBuffer, sizeof(dateBuffer), "%d.%02d", tm.Day, tm.Month);
-            snprintf(txtBuffer, sizeof(txtBuffer), "DST %d W%u", dst, tm.Wday);
-
-            /*
-             * Draw the time using the larger font.
-             * Single-digit hours are shifted slightly right
-             * to keep the layout visually balanced.
-             */
-            // indexedLayer.setFont(font6x10);
-			
-			
-            if (displayHour  < 10)
-            {
-                indexedLayer.setFont(gohufont11);
-				indexedLayer.drawString(3, 0, 1, timeBuffer);
-            }
-            else
-            {
-                indexedLayer.setFont(gohufont11b);
-				indexedLayer.drawString(1, 0, 1, timeBuffer);
-            }
-
-            /*
-             * Draw the date and DST indicator using the smaller font.
-             */
-            indexedLayer.setFont(font3x5);
-            indexedLayer.drawString(6, 15, 1, dateBuffer);
-            indexedLayer.drawString(0, 27, 1, txtBuffer);
-
-            /*
-             * Make the newly drawn frame visible.
-             */
-            indexedLayer.swapBuffers();
-        }
+        return;
     }
+
+    lastDisplayUpdate = now;
+    indexedLayer.fillScreen(0);
+
+    if (!RTC.read(tm))
+    {
+        return;
+    }
+
+    updateUtcTime(tm);
+    dst = isDstActive(tm);
+
+    printClockDisplay(tm, dst);
+    printUtcClockDisplay(utcTime);
+
+    drawClockScreen(tm, dst);
 }
