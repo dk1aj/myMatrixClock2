@@ -2,3 +2,7 @@
 .piolibdeps
 .clang_complete
 .gcc-flags.json
+.pio
+doc\dist
+doc\build
+doc\myMatrixClock2_summary.pdf

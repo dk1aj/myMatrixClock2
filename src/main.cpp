@@ -142,6 +142,11 @@ void updateUtcTime(const tmElements_t& rtcTime)
     breakTime(utcTimestamp, utcTime);
 }
 
+const char* dstLabel(bool dstActive)
+{
+    return dstActive ? "Sommer" : "Winter";
+}
+
 void printTwoDigits(int value)
 {
     if (value < 10)
@@ -165,8 +170,8 @@ void printClockDisplay(const tmElements_t& rtcTime, bool dstActive)
     Serial.print(rtcTime.Month);
     Serial.print('.');
     Serial.print(tmYearToCalendar(rtcTime.Year));
-    Serial.print(" DST=");
-    Serial.print(dstActive);
+    Serial.print(' ');
+    Serial.print(dstLabel(dstActive));
     Serial.print(" wday=");
     Serial.println(rtcTime.Wday);
 }
@@ -412,14 +417,16 @@ void drawClockScreen(const tmElements_t& rtcTime, bool dstActive)
 {
     const uint8_t displayHour = displayHourFrom(rtcTime, dstActive);
     char timeBuffer[16];
+    char utcBuffer[16];
     char dateBuffer[16];
     char statusBuffer[16];
 
     applyBrightness(displayHour);
 
     snprintf(timeBuffer, sizeof(timeBuffer), "%d:%02d", displayHour, rtcTime.Minute);
+    snprintf(utcBuffer, sizeof(utcBuffer), "%02d:%02d", utcTime.Hour, utcTime.Minute);
     snprintf(dateBuffer, sizeof(dateBuffer), "%d.%02d", rtcTime.Day, rtcTime.Month);
-    snprintf(statusBuffer, sizeof(statusBuffer), "DST %d W%u", dstActive, rtcTime.Wday);
+    snprintf(statusBuffer, sizeof(statusBuffer), "%s", dstLabel(dstActive));
 
     if (displayHour < 10)
     {
@@ -433,8 +440,9 @@ void drawClockScreen(const tmElements_t& rtcTime, bool dstActive)
     }
 
     indexedLayer.setFont(font3x5);
-    indexedLayer.drawString(6, 20, 1, dateBuffer);
-    indexedLayer.drawString(0, 26, 1, statusBuffer);
+    indexedLayer.drawString(6, 13, 1, utcBuffer);
+    indexedLayer.drawString(6, 19, 1, dateBuffer);
+    indexedLayer.drawString(4, 26, 1, statusBuffer);
     indexedLayer.swapBuffers();
 }
 
