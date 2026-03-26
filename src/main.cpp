@@ -1,3 +1,22 @@
+ /******************************************************************************
+ * Project     : Display Matrix Clock
+ * File        : main.c
+ * Author      : DK1AJ
+ * Date        : 26.03.2026
+ * Version     : 1.0
+ *
+ * Description :
+ * Control software for a display matrix clock.
+ *
+ * License     :
+ * This code may be used, modified, and redistributed freely.
+ * Provided without warranty or liability.
+ *
+ * Notes       :
+ * - Please document all changes
+ * - Keep the original author credit
+ ******************************************************************************/
+
 #include <Arduino.h>
 #include <Wire.h>
 #include <Time.h>
@@ -461,6 +480,7 @@ void setup()
     setupStartMillis = millis();
 }
 
+#ifndef PIO_UNIT_TESTING
 void loop()
 {
     const unsigned long now = millis();
@@ -493,3 +513,4 @@ void loop()
 
     drawClockScreen(tm, dst);
 }
+#endif
