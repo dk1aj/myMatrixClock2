@@ -21,61 +21,68 @@
 #include <Wire.h>
 #include <Time.h>
 #include <DS1307RTC.h>
-#include <SmartMatrix3.h>
-
-
-#define COLOR_DEPTH 24
+// SmartMatrix output disabled in this branch; keep the original include
+// commented for easy reactivation later.
+// #include <SmartMatrix3.h>
 
 namespace
 {
-constexpr uint8_t kMatrixWidth = 32;
-constexpr uint8_t kMatrixHeight = 32;
-constexpr uint8_t kRefreshDepth = 48;
-constexpr uint8_t kDmaBufferRows = 4;
-constexpr uint8_t kPanelType = SMARTMATRIX_HUB75_32ROW_MOD16SCAN;
-constexpr uint8_t kMatrixOptions = SMARTMATRIX_OPTIONS_NONE;
-constexpr uint8_t kIndexedLayerOptions = SM_INDEXED_OPTIONS_NONE;
-
-constexpr int kNightBrightness = 0;
-constexpr int kDayBrightness = 10;
-
-constexpr unsigned long kDisplayUpdateIntervalMs = 1000;
-constexpr unsigned long kStartupPromptDelayMs = 2000;
-constexpr unsigned long kStartupSplashDurationMs = 5000;
-constexpr uint32_t kSerialBaud = 9600;
-constexpr uint32_t kSerial1Baud = 115200;
+// SmartMatrix output disabled in this branch; keep the original display
+// configuration commented for easy reactivation later.
+// #define COLOR_DEPTH 24
+// constexpr uint8_t kMatrixWidth = 32;
+// constexpr uint8_t kMatrixHeight = 32;
+// constexpr uint8_t kRefreshDepth = 48;
+// constexpr uint8_t kDmaBufferRows = 4;
+// constexpr uint8_t kPanelType = SMARTMATRIX_HUB75_32ROW_MOD16SCAN;
+// constexpr uint8_t kMatrixOptions = SMARTMATRIX_OPTIONS_NONE;
+// constexpr uint8_t kIndexedLayerOptions = SM_INDEXED_OPTIONS_NONE;
+//
+// constexpr int kNightBrightness = 0;
+// constexpr int kDayBrightness = 10;
+//
+// constexpr unsigned long kDisplayUpdateIntervalMs = 1000;
+constexpr unsigned long kUsbSerialStartupPromptDelayMs = 2000;
+// constexpr unsigned long kStartupSplashDurationMs = 5000;
+constexpr unsigned long kStatusUpdateIntervalMs = 1000;
+constexpr uint32_t kUsbSerialBaud = 9600;
+constexpr uint32_t kUartSerialBaud = 115200;
 
 constexpr uint8_t kDstStartMonth = 3;
 constexpr uint8_t kDstEndMonth = 10;
 constexpr uint8_t kDstStartHour = 2;
 constexpr uint8_t kDstEndHour = 3;
-constexpr uint8_t kNightModeStartHour = 20;
-constexpr uint8_t kNightModeEndHour = 8;
+// constexpr uint8_t kNightModeStartHour = 20;
+// constexpr uint8_t kNightModeEndHour = 8;
 constexpr int kStandardUtcOffsetHours = 1;
 
-constexpr char kStartupLabel[] = "DK1AJ";
-constexpr char kTimeInputFormat[] = "YYYY-MM-DD HH:MM:SS + CR/LF";
+// constexpr char kStartupLabel[] = "DK1AJ";
+constexpr char kRtcInputFormat[] = "YYYY-MM-DD HH:MM:SS + CR/LF";
+constexpr char kUsbSerialSourceLabel[] = "USB Serial";
+constexpr char kUartSerialSourceLabel[] = "UART Serial";
 }
 
-SMARTMATRIX_ALLOCATE_BUFFERS(matrix, kMatrixWidth, kMatrixHeight, kRefreshDepth, kDmaBufferRows, kPanelType, kMatrixOptions);
-SMARTMATRIX_ALLOCATE_INDEXED_LAYER(indexedLayer, kMatrixWidth, kMatrixHeight, COLOR_DEPTH, kIndexedLayerOptions);
+// SmartMatrix output disabled in this branch; keep the original display
+// objects commented for easy reactivation later.
+// SMARTMATRIX_ALLOCATE_BUFFERS(matrix, kMatrixWidth, kMatrixHeight, kRefreshDepth, kDmaBufferRows, kPanelType, kMatrixOptions);
+// SMARTMATRIX_ALLOCATE_INDEXED_LAYER(indexedLayer, kMatrixWidth, kMatrixHeight, COLOR_DEPTH, kIndexedLayerOptions);
 
 bool dst = true;
-unsigned long lastDisplayUpdate = 0;
-unsigned long setupStartMillis = 0;
-bool startupMessageShown = false;
+unsigned long lastStatusUpdate = 0;
+unsigned long usbSerialPromptStartMillis = 0;
+bool usbSerialStartupPromptShown = false;
 tmElements_t tm;
 tmElements_t utcTime;
 
-struct LineInputState
+struct SerialLineInputState
 {
     char input[32];
     uint8_t idx = 0;
     bool ignoreNextLineFeed = false;
 };
 
-LineInputState usbInputState;
-LineInputState uartInputState;
+SerialLineInputState usbSerialInputState;
+SerialLineInputState uartSerialInputState;
 
 bool isLeapYear(int year)
 {
@@ -176,7 +183,7 @@ const char* dstLabel(bool dstActive)
     return dstActive ? "Sommer" : "Winter";
 }
 
-void printTwoDigits(int value)
+void printUsbSerialTwoDigits(int value)
 {
     if (value < 10)
     {
@@ -186,13 +193,13 @@ void printTwoDigits(int value)
     Serial.print(value);
 }
 
-void printClockDisplay(const tmElements_t& rtcTime, bool dstActive)
+void printClockStatusToUsbSerial(const tmElements_t& rtcTime, bool dstActive)
 {
     Serial.print(rtcTime.Hour);
     Serial.print(':');
-    printTwoDigits(rtcTime.Minute);
+    printUsbSerialTwoDigits(rtcTime.Minute);
     Serial.print(':');
-    printTwoDigits(rtcTime.Second);
+    printUsbSerialTwoDigits(rtcTime.Second);
     Serial.print(' ');
     Serial.print(rtcTime.Day);
     Serial.print('.');
@@ -205,14 +212,14 @@ void printClockDisplay(const tmElements_t& rtcTime, bool dstActive)
     Serial.println(rtcTime.Wday);
 }
 
-void printUtcClockDisplay(const tmElements_t& timeUtc)
+void printUtcClockStatusToUsbSerial(const tmElements_t& timeUtc)
 {
     Serial.print("UTC ");
     Serial.print(timeUtc.Hour);
     Serial.print(':');
-    printTwoDigits(timeUtc.Minute);
+    printUsbSerialTwoDigits(timeUtc.Minute);
     Serial.print(':');
-    printTwoDigits(timeUtc.Second);
+    printUsbSerialTwoDigits(timeUtc.Second);
     Serial.print(' ');
     Serial.print(timeUtc.Day);
     Serial.print('.');
@@ -221,27 +228,27 @@ void printUtcClockDisplay(const tmElements_t& timeUtc)
     Serial.println(tmYearToCalendar(timeUtc.Year));
 }
 
-void printNormalizedTimestamp(int year, int month, int day, int hour, int minute, int second)
+void printRtcUpdateTimestampToUsbSerial(int year, int month, int day, int hour, int minute, int second)
 {
     Serial.print("RTC set to: ");
     Serial.print(year);
     Serial.print('-');
-    printTwoDigits(month);
+    printUsbSerialTwoDigits(month);
     Serial.print('-');
-    printTwoDigits(day);
+    printUsbSerialTwoDigits(day);
     Serial.print(' ');
-    printTwoDigits(hour);
+    printUsbSerialTwoDigits(hour);
     Serial.print(':');
-    printTwoDigits(minute);
+    printUsbSerialTwoDigits(minute);
     Serial.print(':');
-    printTwoDigits(second);
+    printUsbSerialTwoDigits(second);
     Serial.println();
 }
 
-void printInputSource(const char* sourceLabel)
+void printRtcInputSourceToUsbSerial(const char* serialSourceLabel)
 {
     Serial.print("RTC input via ");
-    Serial.println(sourceLabel);
+    Serial.println(serialSourceLabel);
 }
 
 bool hasBasicDateTimeRange(int year, int month, int day, int hour, int minute, int second)
@@ -254,7 +261,7 @@ bool hasBasicDateTimeRange(int year, int month, int day, int hour, int minute, i
            second >= 0 && second <= 59;
 }
 
-bool parseRtcInput(const char* input, tmElements_t& normalized, time_t& parsedTime)
+bool parseRtcDateTimeInput(const char* input, tmElements_t& normalized, time_t& parsedTime)
 {
     int year = 0;
     int month = 0;
@@ -269,7 +276,7 @@ bool parseRtcInput(const char* input, tmElements_t& normalized, time_t& parsedTi
         Serial.print(input);
         Serial.println(']');
         Serial.print("Invalid format. Please enter: ");
-        Serial.println(kTimeInputFormat);
+        Serial.println(kRtcInputFormat);
         return false;
     }
 
@@ -304,18 +311,18 @@ bool parseRtcInput(const char* input, tmElements_t& normalized, time_t& parsedTi
     return true;
 }
 
-void discardStreamLine(Stream& stream)
+void discardRemainingSerialLine(Stream& serialStream)
 {
-    while (stream.available() > 0)
+    while (serialStream.available() > 0)
     {
-        if (stream.read() == '\n')
+        if (serialStream.read() == '\n')
         {
             break;
         }
     }
 }
 
-bool applyRtcUpdate(tmElements_t normalized, time_t parsedTime, const char* sourceLabel)
+bool applyRtcUpdateFromSerialInput(tmElements_t normalized, time_t parsedTime, const char* serialSourceLabel)
 {
     if (!RTC.write(normalized))
     {
@@ -324,8 +331,8 @@ bool applyRtcUpdate(tmElements_t normalized, time_t parsedTime, const char* sour
     }
 
     setTime(parsedTime);
-    printInputSource(sourceLabel);
-    printNormalizedTimestamp(
+    printRtcInputSourceToUsbSerial(serialSourceLabel);
+    printRtcUpdateTimestampToUsbSerial(
         tmYearToCalendar(normalized.Year),
         normalized.Month,
         normalized.Day,
@@ -335,26 +342,26 @@ bool applyRtcUpdate(tmElements_t normalized, time_t parsedTime, const char* sour
     return true;
 }
 
-bool setRTCFromStream(Stream& stream, LineInputState& state, const char* sourceLabel)
+bool trySetRtcFromSerialStream(Stream& serialStream, SerialLineInputState& serialInputState, const char* serialSourceLabel)
 {
-    while (stream.available() > 0)
+    while (serialStream.available() > 0)
     {
-        const char c = stream.read();
+        const char c = serialStream.read();
 
-        if (state.ignoreNextLineFeed && c == '\n')
+        if (serialInputState.ignoreNextLineFeed && c == '\n')
         {
-            state.ignoreNextLineFeed = false;
+            serialInputState.ignoreNextLineFeed = false;
             continue;
         }
 
         if (c == '\r' || c == '\n')
         {
-            state.ignoreNextLineFeed = (c == '\r');
+            serialInputState.ignoreNextLineFeed = (c == '\r');
 
-            state.input[state.idx] = '\0';
-            state.idx = 0;
+            serialInputState.input[serialInputState.idx] = '\0';
+            serialInputState.idx = 0;
 
-            if (state.input[0] == '\0')
+            if (serialInputState.input[0] == '\0')
             {
                 return false;
             }
@@ -362,12 +369,12 @@ bool setRTCFromStream(Stream& stream, LineInputState& state, const char* sourceL
             tmElements_t normalized = {};
             time_t parsedTime = 0;
 
-            if (!parseRtcInput(state.input, normalized, parsedTime))
+            if (!parseRtcDateTimeInput(serialInputState.input, normalized, parsedTime))
             {
                 return false;
             }
 
-            return applyRtcUpdate(normalized, parsedTime, sourceLabel);
+            return applyRtcUpdateFromSerialInput(normalized, parsedTime, serialSourceLabel);
         }
 
         if (c < 32 || c > 126)
@@ -375,14 +382,14 @@ bool setRTCFromStream(Stream& stream, LineInputState& state, const char* sourceL
             continue;
         }
 
-        if (state.idx < sizeof(state.input) - 1)
+        if (serialInputState.idx < sizeof(serialInputState.input) - 1)
         {
-            state.input[state.idx++] = c;
+            serialInputState.input[serialInputState.idx++] = c;
             continue;
         }
 
-        state.idx = 0;
-        discardStreamLine(stream);
+        serialInputState.idx = 0;
+        discardRemainingSerialLine(serialStream);
         Serial.println("Input too long");
         return false;
     }
@@ -398,19 +405,21 @@ void configureRtcPins(void)
     CORE_PIN17_CONFIG = PORT_PCR_MUX(2) | PORT_PCR_PE | PORT_PCR_PS;
 }
 
-void showStartupSplash(void)
-{
-    matrix.setBrightness(kDayBrightness);
-    indexedLayer.fillScreen(0);
-    indexedLayer.setFont(gohufont11b);
-    indexedLayer.drawString(0, kMatrixHeight / 2 - 6, 1, kStartupLabel);
-    indexedLayer.swapBuffers(false);
-
-    const unsigned long splashStart = millis();
-    while (millis() - splashStart < kStartupSplashDurationMs)
-    {
-    }
-}
+// SmartMatrix output disabled in this branch; keep the original startup
+// splash code commented for easy reactivation later.
+// void showStartupSplash(void)
+// {
+//     matrix.setBrightness(kDayBrightness);
+//     indexedLayer.fillScreen(0);
+//     indexedLayer.setFont(gohufont11b);
+//     indexedLayer.drawString(0, kMatrixHeight / 2 - 6, 1, kStartupLabel);
+//     indexedLayer.swapBuffers(false);
+//
+//     const unsigned long splashStart = millis();
+//     while (millis() - splashStart < kStartupSplashDurationMs)
+//     {
+//     }
+// }
 
 void syncTimeFromRtc(void)
 {
@@ -426,81 +435,85 @@ void syncTimeFromRtc(void)
     }
 }
 
-void maybeShowStartupPrompt(unsigned long now)
+void maybeShowUsbSerialStartupPrompt(unsigned long now)
 {
-    if (startupMessageShown || (now - setupStartMillis < kStartupPromptDelayMs))
+    if (usbSerialStartupPromptShown || (now - usbSerialPromptStartMillis < kUsbSerialStartupPromptDelayMs))
     {
         return;
     }
 
-    Serial.println("USB debug active");
+    Serial.println("USB Serial debug active");
     Serial.print("Build: ");
     Serial.print(__DATE__);
     Serial.print(' ');
     Serial.println(__TIME__);
     Serial.print("Set time with: ");
-    Serial.println(kTimeInputFormat);
+    Serial.println(kRtcInputFormat);
     Serial.println("Example: 2026-03-25 14:30:00");
-    startupMessageShown = true;
+    usbSerialStartupPromptShown = true;
 }
 
-uint8_t displayHourFrom(const tmElements_t& rtcTime, bool dstActive)
-{
-    return (rtcTime.Hour + (dstActive ? 1 : 0)) % 24;
-}
-
-void applyBrightness(uint8_t displayHour)
-{
-    const bool nightMode = displayHour >= kNightModeStartHour || displayHour < kNightModeEndHour;
-    matrix.setBrightness(nightMode ? kNightBrightness : kDayBrightness);
-}
-
-void drawClockScreen(const tmElements_t& rtcTime, bool dstActive)
-{
-    const uint8_t displayHour = displayHourFrom(rtcTime, dstActive);
-    char timeBuffer[16];
-    char utcBuffer[16];
-    char dateBuffer[16];
-    char statusBuffer[16];
-
-    applyBrightness(displayHour);
-
-    snprintf(timeBuffer, sizeof(timeBuffer), "%d:%02d", displayHour, rtcTime.Minute);
-    snprintf(utcBuffer, sizeof(utcBuffer), "%02d:%02d", utcTime.Hour, utcTime.Minute);
-    snprintf(dateBuffer, sizeof(dateBuffer), "%d.%02d", rtcTime.Day, rtcTime.Month);
-    snprintf(statusBuffer, sizeof(statusBuffer), "%s", dstLabel(dstActive));
-
-    if (displayHour < 10)
-    {
-        indexedLayer.setFont(gohufont11b);
-        indexedLayer.drawString(3, 0, 1, timeBuffer);
-    }
-    else
-    {
-        indexedLayer.setFont(gohufont11b);
-        indexedLayer.drawString(1, 0, 1, timeBuffer);
-    }
-
-    indexedLayer.setFont(font3x5);
-    indexedLayer.drawString(6, 13, 1, utcBuffer);
-    indexedLayer.drawString(6, 19, 1, dateBuffer);
-    indexedLayer.drawString(4, 26, 1, statusBuffer);
-    indexedLayer.swapBuffers();
-}
+// SmartMatrix output disabled in this branch; keep the original display
+// rendering code commented for easy reactivation later.
+// uint8_t displayHourFrom(const tmElements_t& rtcTime, bool dstActive)
+// {
+//     return (rtcTime.Hour + (dstActive ? 1 : 0)) % 24;
+// }
+//
+// void applyBrightness(uint8_t displayHour)
+// {
+//     const bool nightMode = displayHour >= kNightModeStartHour || displayHour < kNightModeEndHour;
+//     matrix.setBrightness(nightMode ? kNightBrightness : kDayBrightness);
+// }
+//
+// void drawClockScreen(const tmElements_t& rtcTime, bool dstActive)
+// {
+//     const uint8_t displayHour = displayHourFrom(rtcTime, dstActive);
+//     char timeBuffer[16];
+//     char utcBuffer[16];
+//     char dateBuffer[16];
+//     char statusBuffer[16];
+//
+//     applyBrightness(displayHour);
+//
+//     snprintf(timeBuffer, sizeof(timeBuffer), "%d:%02d", displayHour, rtcTime.Minute);
+//     snprintf(utcBuffer, sizeof(utcBuffer), "%02d:%02d", utcTime.Hour, utcTime.Minute);
+//     snprintf(dateBuffer, sizeof(dateBuffer), "%d.%02d", rtcTime.Day, rtcTime.Month);
+//     snprintf(statusBuffer, sizeof(statusBuffer), "%s", dstLabel(dstActive));
+//
+//     if (displayHour < 10)
+//     {
+//         indexedLayer.setFont(gohufont11b);
+//         indexedLayer.drawString(3, 0, 1, timeBuffer);
+//     }
+//     else
+//     {
+//         indexedLayer.setFont(gohufont11b);
+//         indexedLayer.drawString(1, 0, 1, timeBuffer);
+//     }
+//
+//     indexedLayer.setFont(font3x5);
+//     indexedLayer.drawString(6, 13, 1, utcBuffer);
+//     indexedLayer.drawString(6, 19, 1, dateBuffer);
+//     indexedLayer.drawString(4, 26, 1, statusBuffer);
+//     indexedLayer.swapBuffers();
+// }
 
 void setup()
 {
-    Serial.begin(kSerialBaud);
-    Serial1.begin(kSerial1Baud);
+    Serial.begin(kUsbSerialBaud);
+    Serial1.begin(kUartSerialBaud);
 
-    matrix.addLayer(&indexedLayer);
-    matrix.begin();
+    // SmartMatrix output disabled in this branch; keep the original
+    // initialization commented for easy reactivation later.
+    // matrix.addLayer(&indexedLayer);
+    // matrix.begin();
 
-    showStartupSplash();
+    // showStartupSplash();
     configureRtcPins();
     syncTimeFromRtc();
 
-    setupStartMillis = millis();
+    usbSerialPromptStartMillis = millis();
 }
 
 #ifndef PIO_UNIT_TESTING
@@ -508,25 +521,28 @@ void loop()
 {
     const unsigned long now = millis();
 
-    maybeShowStartupPrompt(now);
+    maybeShowUsbSerialStartupPrompt(now);
 
     if (Serial.available() > 0)
     {
-        setRTCFromStream(Serial, usbInputState, "USB");
+        trySetRtcFromSerialStream(Serial, usbSerialInputState, kUsbSerialSourceLabel);
     }
 
     if (Serial1.available() > 0)
     {
-        setRTCFromStream(Serial1, uartInputState, "Serial1");
+        trySetRtcFromSerialStream(Serial1, uartSerialInputState, kUartSerialSourceLabel);
     }
 
-    if (now - lastDisplayUpdate < kDisplayUpdateIntervalMs)
+    if (now - lastStatusUpdate < kStatusUpdateIntervalMs)
     {
         return;
     }
 
-    lastDisplayUpdate = now;
-    indexedLayer.fillScreen(0);
+    lastStatusUpdate = now;
+
+    // SmartMatrix output disabled in this branch; keep the original clear
+    // operation commented for easy reactivation later.
+    // indexedLayer.fillScreen(0);
 
     if (!RTC.read(tm))
     {
@@ -536,9 +552,9 @@ void loop()
     updateUtcTime(tm);
     dst = isDstActive(tm);
 
-    printClockDisplay(tm, dst);
-    printUtcClockDisplay(utcTime);
+    printClockStatusToUsbSerial(tm, dst);
+    printUtcClockStatusToUsbSerial(utcTime);
 
-    drawClockScreen(tm, dst);
+    // drawClockScreen(tm, dst);
 }
 #endif
