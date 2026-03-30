@@ -3,6 +3,10 @@
 		{
 			"name": "myMatrixClock2",
 			"path": "."
+		},
+		{
+			"name": "NTP_2",
+			"path": "../NTP_2"
 		}
 	],
 	"settings": {}

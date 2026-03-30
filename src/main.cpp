@@ -1,6 +1,6 @@
  /******************************************************************************
  * Project     : Display Matrix Clock
- * File        : main.c
+ * File        : main.c 
  * Author      : DK1AJ
  * Date        : 26.03.2026
  * Version     : 1.0
@@ -38,12 +38,12 @@ constexpr uint8_t kIndexedLayerOptions = SM_INDEXED_OPTIONS_NONE;
 
 constexpr int kNightBrightness = 0;
 constexpr int kDayBrightness = 10;
-constexpr int kLedPin = 13;
 
 constexpr unsigned long kDisplayUpdateIntervalMs = 1000;
 constexpr unsigned long kStartupPromptDelayMs = 2000;
 constexpr unsigned long kStartupSplashDurationMs = 5000;
 constexpr uint32_t kSerialBaud = 9600;
+constexpr uint32_t kSerial1Baud = 115200;
 
 constexpr uint8_t kDstStartMonth = 3;
 constexpr uint8_t kDstEndMonth = 10;
@@ -66,6 +66,16 @@ unsigned long setupStartMillis = 0;
 bool startupMessageShown = false;
 tmElements_t tm;
 tmElements_t utcTime;
+
+struct LineInputState
+{
+    char input[32];
+    uint8_t idx = 0;
+    bool ignoreNextLineFeed = false;
+};
+
+LineInputState usbInputState;
+LineInputState uartInputState;
 
 bool isLeapYear(int year)
 {
@@ -228,6 +238,12 @@ void printNormalizedTimestamp(int year, int month, int day, int hour, int minute
     Serial.println();
 }
 
+void printInputSource(const char* sourceLabel)
+{
+    Serial.print("RTC input via ");
+    Serial.println(sourceLabel);
+}
+
 bool hasBasicDateTimeRange(int year, int month, int day, int hour, int minute, int second)
 {
     return year >= 2000 && year <= 2099 &&
@@ -288,41 +304,57 @@ bool parseRtcInput(const char* input, tmElements_t& normalized, time_t& parsedTi
     return true;
 }
 
-void discardSerialLine(void)
+void discardStreamLine(Stream& stream)
 {
-    while (Serial.available() > 0)
+    while (stream.available() > 0)
     {
-        if (Serial.read() == '\n')
+        if (stream.read() == '\n')
         {
             break;
         }
     }
 }
 
-bool setRTCFromSerial(void)
+bool applyRtcUpdate(tmElements_t normalized, time_t parsedTime, const char* sourceLabel)
 {
-    static char input[32];
-    static uint8_t idx = 0;
-    static bool ignoreNextLineFeed = false;
-
-    while (Serial.available() > 0)
+    if (!RTC.write(normalized))
     {
-        const char c = Serial.read();
+        Serial.println("Error: RTC write failed");
+        return false;
+    }
 
-        if (ignoreNextLineFeed && c == '\n')
+    setTime(parsedTime);
+    printInputSource(sourceLabel);
+    printNormalizedTimestamp(
+        tmYearToCalendar(normalized.Year),
+        normalized.Month,
+        normalized.Day,
+        normalized.Hour,
+        normalized.Minute,
+        normalized.Second);
+    return true;
+}
+
+bool setRTCFromStream(Stream& stream, LineInputState& state, const char* sourceLabel)
+{
+    while (stream.available() > 0)
+    {
+        const char c = stream.read();
+
+        if (state.ignoreNextLineFeed && c == '\n')
         {
-            ignoreNextLineFeed = false;
+            state.ignoreNextLineFeed = false;
             continue;
         }
 
         if (c == '\r' || c == '\n')
         {
-            ignoreNextLineFeed = (c == '\r');
+            state.ignoreNextLineFeed = (c == '\r');
 
-            input[idx] = '\0';
-            idx = 0;
+            state.input[state.idx] = '\0';
+            state.idx = 0;
 
-            if (input[0] == '\0')
+            if (state.input[0] == '\0')
             {
                 return false;
             }
@@ -330,26 +362,12 @@ bool setRTCFromSerial(void)
             tmElements_t normalized = {};
             time_t parsedTime = 0;
 
-            if (!parseRtcInput(input, normalized, parsedTime))
+            if (!parseRtcInput(state.input, normalized, parsedTime))
             {
                 return false;
             }
 
-            if (!RTC.write(normalized))
-            {
-                Serial.println("Error: RTC write failed");
-                return false;
-            }
-
-            setTime(parsedTime);
-            printNormalizedTimestamp(
-                tmYearToCalendar(normalized.Year),
-                normalized.Month,
-                normalized.Day,
-                normalized.Hour,
-                normalized.Minute,
-                normalized.Second);
-            return true;
+            return applyRtcUpdate(normalized, parsedTime, sourceLabel);
         }
 
         if (c < 32 || c > 126)
@@ -357,14 +375,14 @@ bool setRTCFromSerial(void)
             continue;
         }
 
-        if (idx < sizeof(input) - 1)
+        if (state.idx < sizeof(state.input) - 1)
         {
-            input[idx++] = c;
+            state.input[state.idx++] = c;
             continue;
         }
 
-        idx = 0;
-        discardSerialLine();
+        state.idx = 0;
+        discardStreamLine(stream);
         Serial.println("Input too long");
         return false;
     }
@@ -415,6 +433,11 @@ void maybeShowStartupPrompt(unsigned long now)
         return;
     }
 
+    Serial.println("USB debug active");
+    Serial.print("Build: ");
+    Serial.print(__DATE__);
+    Serial.print(' ');
+    Serial.println(__TIME__);
     Serial.print("Set time with: ");
     Serial.println(kTimeInputFormat);
     Serial.println("Example: 2026-03-25 14:30:00");
@@ -467,8 +490,8 @@ void drawClockScreen(const tmElements_t& rtcTime, bool dstActive)
 
 void setup()
 {
-    pinMode(kLedPin, OUTPUT);
     Serial.begin(kSerialBaud);
+    Serial1.begin(kSerial1Baud);
 
     matrix.addLayer(&indexedLayer);
     matrix.begin();
@@ -489,7 +512,12 @@ void loop()
 
     if (Serial.available() > 0)
     {
-        setRTCFromSerial();
+        setRTCFromStream(Serial, usbInputState, "USB");
+    }
+
+    if (Serial1.available() > 0)
+    {
+        setRTCFromStream(Serial1, uartInputState, "Serial1");
     }
 
     if (now - lastDisplayUpdate < kDisplayUpdateIntervalMs)
