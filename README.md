@@ -1,5 +1,12 @@
 # myMatrixClock2
 
+## Project status
+
+Completed for now.
+
+The current hardware and firmware have been tested successfully and are stable.
+Further changes are only planned if a new requirement or problem appears.
+
 ## Purpose
 
 `myMatrixClock2` is the Teensy firmware for a 32x32 HUB75 matrix clock. It
