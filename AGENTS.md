@@ -356,7 +356,12 @@ NTP_2/src/ntp_2.cpp
 
 After any code modification, compile the affected project.
 
-For communication, RTC or timestamp changes, compile BOTH projects.
+After every firmware-affecting code or configuration change, also flash the
+affected device after a successful build. A coding task is not complete until
+the required upload succeeds.
+
+For communication, RTC or timestamp changes, compile and flash BOTH projects,
+one after the other.
 
 Expected PlatformIO environments:
 
@@ -368,11 +373,22 @@ NTP_2:
 env:esp32dev
 ```
 
-A task is not considered complete if required builds fail.
+Current upload ports:
+
+```text
+myMatrixClock2 / Teensy: COM19
+NTP_2 / ESP32:          COM16
+```
+
+Flash the Teensy first and the ESP32 second when both devices are affected.
+Documentation-only changes do not require a firmware build or upload.
+
+A task is not considered complete if required builds or uploads fail.
 
 Report:
 
 - build result,
+- upload result,
 - relevant warnings,
 - RAM use,
 - Flash use.

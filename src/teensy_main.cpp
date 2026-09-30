@@ -88,7 +88,10 @@ constexpr size_t kSpiTimeTextLength = 19;
 constexpr size_t kSpiTimeTerminatorIndex = kSpiTimeTextLength;
 constexpr size_t kSpiNtpStatusIndex = 20;
 constexpr size_t kSpiSequenceIndex = 21;
+constexpr size_t kSpiUtcOffsetStatusIndex = 22;
 constexpr uint8_t kNtpStatusSynchronized = 0x01;
+constexpr uint8_t kUtcOffsetStatusCet = 0x01;
+constexpr uint8_t kUtcOffsetStatusCest = 0x02;
 constexpr char kSpiStatusPollMarker[] = "STATUS?";
 constexpr size_t kSpiStatusPollMarkerLength = sizeof(kSpiStatusPollMarker) - 1;
 constexpr unsigned long kSpiBitTimeoutUs = 50000;
@@ -162,10 +165,14 @@ unsigned long setupStartMillis = 0;
 bool startupMessageShown = false;
 bool ntpStatusReceived = false;
 bool ntpSynchronizedForCurrentMinute = false;
+bool spiUtcOffsetStatusValid = false;
+bool spiDstActive = false;
+bool rtcReadError = false;
 tmElements_t tm;
 tmElements_t utcTime;
 SpiTimeFrameState spiTimeFrame = {};
 bool spiChipSelectActive = false;
+bool spiReceptionArmed = true;
 uint8_t spiReplyByte = static_cast<uint8_t>(SpiReplyCode::Idle);
 uint8_t spiReplySequence = 0;
 size_t utcSuffixColorIndex = 0;
@@ -475,11 +482,18 @@ inline bool receiveSpiByte(uint8_t& receivedByte, uint8_t replyByte)
  */
 void pollSpiTimeFrame(void)
 {
-    if (digitalRead(kSpiCsPin) != LOW)
+    if (digitalRead(kSpiCsPin) == HIGH)
+    {
+        spiReceptionArmed = true;
+        return;
+    }
+
+    if (!spiReceptionArmed)
     {
         return;
     }
 
+    spiReceptionArmed = false;
     spiChipSelectActive = true;
     resetSpiTimeFrameState(spiTimeFrame);
 
@@ -509,10 +523,7 @@ transfer_done:
     spiChipSelectActive = false;
     digitalWrite(kSpiSoutPin, (spiReplyByte & 0x80U) != 0 ? HIGH : LOW);
 
-    if (spiTimeFrame.receivedBytes > 0)
-    {
-        spiTimeFrame.frameReady = true;
-    }
+    spiTimeFrame.frameReady = true;
 }
 
 /**
@@ -567,6 +578,23 @@ void processSpiTimeFrame(void)
                 ntpStatusReceived = true;
                 USB_serial.print("NTP status: ");
                 USB_serial.println(ntpSynchronizedForCurrentMinute ? "OK" : "FAIL");
+            }
+
+            const uint8_t utcOffsetStatus =
+                static_cast<uint8_t>(spiTimeFrame.frame[kSpiUtcOffsetStatusIndex]);
+            spiUtcOffsetStatusValid =
+                utcOffsetStatus == kUtcOffsetStatusCet ||
+                utcOffsetStatus == kUtcOffsetStatusCest;
+
+            if (spiUtcOffsetStatusValid)
+            {
+                spiDstActive = utcOffsetStatus == kUtcOffsetStatusCest;
+                USB_serial.print("UTC offset status: ");
+                USB_serial.println(spiDstActive ? "CEST" : "CET");
+            }
+            else
+            {
+                USB_serial.println("UTC offset status invalid - using RTC fallback");
             }
         }
         setSpiReplyForSequence(spiReplyCodeForRtcResult(updateResult), frameSequence);
@@ -694,6 +722,34 @@ bool isDstActive(const tmElements_t& rtcTime)
     }
 
     return rtcTime.Hour < kDstEndHour;
+}
+
+/**
+ * Returns whether local civil time is in the repeated hour at the end of DST.
+ */
+bool isAmbiguousAutumnHour(const tmElements_t& rtcTime)
+{
+    if (rtcTime.Month != kDstEndMonth || rtcTime.Hour != 2)
+    {
+        return false;
+    }
+
+    return rtcTime.Day ==
+        lastSundayOfMonth(tmYearToCalendar(rtcTime.Year), kDstEndMonth);
+}
+
+/**
+ * Uses the ESP32's explicit UTC-offset state only where local RTC time alone
+ * cannot distinguish the two occurrences of 02:xx.
+ */
+bool resolveDstActive(const tmElements_t& rtcTime)
+{
+    if (spiUtcOffsetStatusValid && isAmbiguousAutumnHour(rtcTime))
+    {
+        return spiDstActive;
+    }
+
+    return isDstActive(rtcTime);
 }
 
 /**
@@ -948,7 +1004,13 @@ bool setRTCFromSerial(void)
                 continue;
             }
 
-            return setRtcFromLine(input) == RtcUpdateResult::Accepted;
+            const bool accepted =
+                setRtcFromLine(input) == RtcUpdateResult::Accepted;
+            if (accepted)
+            {
+                spiUtcOffsetStatusValid = false;
+            }
+            return accepted;
         }
 
         if (c < 32 || c > 126)
@@ -1121,6 +1183,25 @@ void drawClockScreen(const tmElements_t& rtcTime, bool dstActive)
 }
 
 /**
+ * Replaces stale clock data with a clear RTC read-error indication.
+ */
+void drawRtcReadErrorScreen(void)
+{
+    constexpr int16_t kRtcErrorTextWidth = 15;
+    constexpr int16_t kRtcErrorY = 12;
+
+    matrix.setBrightness(kDayBrightness);
+    backgroundLayer.fillScreen({0x00, 0x00, 0x00});
+    backgroundLayer.setFont(font5x7);
+    backgroundLayer.drawString(
+        (kMatrixWidth - kRtcErrorTextWidth) / 2,
+        kRtcErrorY,
+        {0xff, 0x00, 0x00},
+        "RTC");
+    backgroundLayer.swapBuffers(true);
+}
+
+/**
  * Initializes USB serial, display layers, RTC access, and SPI slave support.
  */
 void setup()
@@ -1166,10 +1247,16 @@ void loop()
 
     if (!RTC.read(tm))
     {
+        if (!rtcReadError)
+        {
+            rtcReadError = true;
+            drawRtcReadErrorScreen();
+        }
         return;
     }
 
-    dst = isDstActive(tm);
+    rtcReadError = false;
+    dst = resolveDstActive(tm);
     updateUtcTime(tm, dst);
 
     printClockDisplay(tm, dst);

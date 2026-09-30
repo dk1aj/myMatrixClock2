@@ -1,111 +1,88 @@
 # myMatrixClock2
 
-`myMatrixClock2` is the Teensy-side firmware for a 32x32 HUB75 matrix clock.
-It renders local time, UTC, date, DST status, and accepts RTC updates from the
-companion ESP32 NTP bridge over a small custom SPI protocol.
+## Purpose
 
-## Features
+`myMatrixClock2` is the Teensy firmware for a 32x32 HUB75 matrix clock. It
+drives the display through SmartMatrix, stores local civil time in a DS1307
+RTC, and receives time updates from an ESP32 running `NTP_2`.
 
-- 32x32 SmartMatrix clock display on Teensy 3.1 / 3.2
-- local time from a DS1307 RTC
-- UTC display with trailing `Z`
-- DST status line shown as `CET` / `CEST`
-- minute-level RTC updates received from the ESP32 companion project
-- USB serial input for manual RTC setting
-- Python GUI for serial monitoring and SPI regression tests
-
-## Repository Layout
-
-- `src/teensy_main.cpp`
-  Teensy firmware for rendering, RTC access, USB input, and SPI slave receive.
-- `python/SetCloch_GUI.py`
-  PySide6 desktop tool for serial monitoring, time sending, and SPI test runs.
-- `platformio.ini`
-  PlatformIO environment for `teensy31`.
-- `lib/SmartMatrix`
-  Vendored SmartMatrix dependency used by the display firmware.
+The clock continues from the RTC when the ESP32 or NTP is unavailable.
 
 ## Hardware
 
 - Teensy 3.1 / 3.2
-- 32x32 HUB75 RGB matrix compatible with SmartMatrix
-- DS1307 RTC module
-- companion ESP32 running the `NTP_2` project
+- DS1307 RTC
+- 32x32 HUB75 RGB matrix
+- SmartMatrix
 
-### RTC Wiring
+RTC connections:
 
-The firmware expects the RTC on the Teensy's alternate I2C pins:
+| Signal | Teensy pin |
+| --- | ---: |
+| SCL | 16 |
+| SDA | 17 |
 
-- RTC `SCL` -> Teensy `16`
-- RTC `SDA` -> Teensy `17`
-- RTC `VCC` / `GND` as required by the module
+ESP32 communication:
 
-### ESP32 SPI Link
+| Signal | Teensy pin |
+| --- | ---: |
+| CS | 15 |
+| MOSI | 11 |
+| MISO | 12 |
+| CLK | 13 |
 
-The ESP32 sends ASCII timestamps in a 32-byte frame. Current Teensy-side
-signal assignment:
+## Display
 
-- `CS`   -> Teensy `15`
-- `SIN`  -> Teensy `11`
-- `SOUT` -> Teensy `12`
-- `CLK`  -> Teensy `13`
-- common `GND`
+The matrix shows:
 
-## Display Layout
+- local time
+- UTC time
+- date
+- CET or CEST state
+- NTP status pixel
+- normal activity/blink pixel
+- a visible red `RTC` message if reading the RTC fails
 
-The current matrix layout is:
+NTP status pixel:
 
-- large local time on the top row
-- UTC line in red with a colored trailing `Z`
-- centered date line
-- centered `CET` / `CEST` status line
-- blinking pixel in the bottom-right corner
+- green: the current minute was successfully synchronized by NTP
+- red: NTP failed and ESP32 system time was used
+- off: no valid NTP status has been received yet
 
-## Manual RTC Input
+The RTC can also be set over USB serial with
+`YYYY-MM-DD HH:MM:SS`.
 
-The Teensy accepts manual USB serial input in this format:
+## Time protocol
+
+The Teensy receives the same fixed 32-byte frame documented by `../NTP_2`.
+The important status fields are:
 
 ```text
-YYYY-MM-DD HH:MM:SS
+Byte 20 = NTP status
+Byte 21 = Sequence ID
+Byte 22 = CET/CEST status
 ```
 
-Example:
+## Reliability
 
-```text
-2026-04-06 17:30:00
-```
-
-## Python GUI
-
-The GUI in `python/SetCloch_GUI.py` is intended for:
-
-- opening Teensy and ESP32 serial ports
-- monitoring RTC and NTP traffic
-- sending manual time strings
-- running the SPI regression suite
-
-The GUI requires:
-
-- Python 3
-- `PySide6`
-- `pyserial`
+- An ACK is valid only when its Sequence ID matches the transmitted frame.
+- Stale ACKs are rejected by the ESP32.
+- The repeated autumn `02:xx` hour uses the explicit ESP32 timezone status.
+- A stuck LOW CS line cannot continuously block the Teensy loop.
+- RTC read failures replace stale clock data with a visible error message.
 
 ## Build
 
-From the repository root:
+- PlatformIO environment: `teensy31`
+- Main source: `src/teensy_main.cpp`
+- Display library: SmartMatrix
+- Current upload and monitor port: `COM19`
 
 ```bash
 pio run -e teensy31
+pio run -e teensy31 -t upload
 ```
 
-The current `platformio.ini` contains local `upload_port` and `monitor_port`
-settings (`COM7`). Adjust them to match your system before flashing.
+## Related project
 
-## Notes For GitHub
-
-- build products and Python cache files are ignored
-- the repository contains local development notes in `my_plan.md`
-- SmartMatrix remains vendored under `lib/SmartMatrix`
-
-If you want a public repository to show an explicit license on GitHub, add a
-top-level `LICENSE` file before publishing.
+The ESP32 NTP sender is in `../NTP_2`.
