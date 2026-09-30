@@ -1,6 +1,6 @@
 /******************************************************************************
  * Project     : Display Matrix Clock
- * File        : main.cpp
+ * File        : teensy_main.cpp
  * Author      : DK1AJ
  * Date        : 26.03.2026
  * Version     : 1.0
@@ -86,6 +86,9 @@ constexpr uint32_t kSerialBaud = 9600;
 constexpr size_t kSpiTimeFrameSize = 32;
 constexpr size_t kSpiTimeTextLength = 19;
 constexpr size_t kSpiTimeTerminatorIndex = kSpiTimeTextLength;
+constexpr size_t kSpiNtpStatusIndex = 20;
+constexpr size_t kSpiSequenceIndex = 21;
+constexpr uint8_t kNtpStatusSynchronized = 0x01;
 constexpr char kSpiStatusPollMarker[] = "STATUS?";
 constexpr size_t kSpiStatusPollMarkerLength = sizeof(kSpiStatusPollMarker) - 1;
 constexpr unsigned long kSpiBitTimeoutUs = 50000;
@@ -157,11 +160,14 @@ bool dst = true;
 unsigned long lastDisplayUpdate = 0;
 unsigned long setupStartMillis = 0;
 bool startupMessageShown = false;
+bool ntpStatusReceived = false;
+bool ntpSynchronizedForCurrentMinute = false;
 tmElements_t tm;
 tmElements_t utcTime;
 SpiTimeFrameState spiTimeFrame = {};
 bool spiChipSelectActive = false;
 uint8_t spiReplyByte = static_cast<uint8_t>(SpiReplyCode::Idle);
+uint8_t spiReplySequence = 0;
 size_t utcSuffixColorIndex = 0;
 
 RtcUpdateResult setRtcFromLine(const char* input);
@@ -244,6 +250,18 @@ void setSpiReplyCode(SpiReplyCode replyCode)
 {
     loadSpiReplyByte(static_cast<uint8_t>(replyCode));
     printSpiReplyDebug(spiReplyByte);
+}
+
+/**
+ * Associates a status response with the sequence ID of the completely received
+ * time frame that produced it.
+ */
+void setSpiReplyForSequence(SpiReplyCode replyCode, uint8_t sequenceId)
+{
+    spiReplySequence = sequenceId;
+    setSpiReplyCode(replyCode);
+    USB_serial.print("ACK sequence: ");
+    USB_serial.println(spiReplySequence);
 }
 
 /**
@@ -423,10 +441,9 @@ bool waitForSpiClockState(int expectedState)
  * Receives one SPI byte bit by bit while presenting the currently latched
  * reply byte on MISO. Returns `false` if the transfer aborts mid-byte.
  */
-inline bool receiveSpiByte(uint8_t& receivedByte)
+inline bool receiveSpiByte(uint8_t& receivedByte, uint8_t replyByte)
 {
     receivedByte = 0;
-    uint8_t replyByte = spiReplyByte;
 
     for (uint8_t bitIndex = 0; bitIndex < 8; ++bitIndex)
     {
@@ -469,8 +486,18 @@ void pollSpiTimeFrame(void)
     while (digitalRead(kSpiCsPin) == LOW && spiTimeFrame.receivedBytes < kSpiTimeFrameSize)
     {
         uint8_t receivedByte = 0;
+        uint8_t replyByte = 0;
 
-        if (!receiveSpiByte(receivedByte))
+        if (spiTimeFrame.receivedBytes == 0)
+        {
+            replyByte = spiReplyByte;
+        }
+        else if (spiTimeFrame.receivedBytes == 1)
+        {
+            replyByte = spiReplySequence;
+        }
+
+        if (!receiveSpiByte(receivedByte, replyByte))
         {
             goto transfer_done;
         }
@@ -506,7 +533,20 @@ void processSpiTimeFrame(void)
         return;
     }
 
+    if (spiTimeFrame.receivedBytes != kSpiTimeFrameSize)
+    {
+        USB_serial.print("SPI RX incomplete, bytes=");
+        USB_serial.println(spiTimeFrame.receivedBytes);
+        printSpiFrameDebug(spiTimeFrame);
+        setSpiReplyCode(SpiReplyCode::ParseError);
+        resetSpiTimeFrameState(spiTimeFrame);
+        return;
+    }
+
     char timeLine[kSpiTimeTextLength + 1] = {};
+    const uint8_t frameSequence = static_cast<uint8_t>(spiTimeFrame.frame[kSpiSequenceIndex]);
+    USB_serial.print("Frame sequence: ");
+    USB_serial.println(frameSequence);
 
     if (extractSpiTimeLine(spiTimeFrame, timeLine, sizeof(timeLine)))
     {
@@ -518,8 +558,18 @@ void processSpiTimeFrame(void)
         if (updateResult == RtcUpdateResult::Accepted)
         {
             advanceUtcSuffixColor();
+            USB_serial.println("RTC write OK");
+
+            if (spiTimeFrame.receivedBytes > kSpiNtpStatusIndex)
+            {
+                ntpSynchronizedForCurrentMinute =
+                    static_cast<uint8_t>(spiTimeFrame.frame[kSpiNtpStatusIndex]) == kNtpStatusSynchronized;
+                ntpStatusReceived = true;
+                USB_serial.print("NTP status: ");
+                USB_serial.println(ntpSynchronizedForCurrentMinute ? "OK" : "FAIL");
+            }
         }
-        setSpiReplyCode(spiReplyCodeForRtcResult(updateResult));
+        setSpiReplyForSequence(spiReplyCodeForRtcResult(updateResult), frameSequence);
 
         if (updateResult != RtcUpdateResult::Accepted)
         {
@@ -531,7 +581,7 @@ void processSpiTimeFrame(void)
         USB_serial.print("SPI RX invalid, bytes=");
         USB_serial.println(spiTimeFrame.receivedBytes);
         printSpiFrameDebug(spiTimeFrame);
-        setSpiReplyCode(SpiReplyCode::ParseError);
+        setSpiReplyForSequence(SpiReplyCode::ParseError, frameSequence);
     }
 
     resetSpiTimeFrameState(spiTimeFrame);
@@ -1057,6 +1107,14 @@ void drawClockScreen(const tmElements_t& rtcTime, bool dstActive)
     if (showBlinkPixel)
     {
         backgroundLayer.drawPixel(kMatrixWidth - 1, kMatrixHeight - 1, {0xff, 0xff, 0xff});
+    }
+
+    if (ntpStatusReceived)
+    {
+        const rgb24 ntpStatusColor = ntpSynchronizedForCurrentMinute
+            ? rgb24{0x00, 0xff, 0x00}
+            : rgb24{0xff, 0x00, 0x00};
+        backgroundLayer.drawPixel(0, kMatrixHeight - 1, ntpStatusColor);
     }
 
     backgroundLayer.swapBuffers(true);

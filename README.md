@@ -16,7 +16,7 @@ companion ESP32 NTP bridge over a small custom SPI protocol.
 
 ## Repository Layout
 
-- `src/main.cpp`
+- `src/teensy_main.cpp`
   Teensy firmware for rendering, RTC access, USB input, and SPI slave receive.
 - `python/SetCloch_GUI.py`
   PySide6 desktop tool for serial monitoring, time sending, and SPI test runs.
